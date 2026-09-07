@@ -29,14 +29,15 @@ end
 
 ---@param s string
 ---@return string
-local function strip_ansi(s)
+function M.strip_ansi(s)
 	return (s:gsub("\27%[[%d;]*[A-Za-z]", ""))
 end
 
+---Build a devenv command line from the configured command plus arguments.
 ---@param devenv string|string[]
 ---@param ... string
 ---@return string[]
-local function devenv_cmd(devenv, ...)
+function M.cmd(devenv, ...)
 	local cmd = type(devenv) == "table" and vim.deepcopy(devenv) or { devenv }
 	return vim.list_extend(cmd, { ... })
 end
@@ -58,13 +59,13 @@ end
 ---@param opts DevenvCheckOpts
 ---@param callback fun(result: DevenvCheckResult)
 function M.check(opts, callback)
-	local ok, err = pcall(vim.system, devenv_cmd(opts.devenv, "hook-should-activate"), {
+	local ok, err = pcall(vim.system, M.cmd(opts.devenv, "hook-should-activate"), {
 		cwd = opts.cwd,
 		env = opts.env,
 		clear_env = opts.env ~= nil,
 		text = true,
 	}, function(res)
-		local stderr = vim.trim(strip_ansi(res.stderr or ""))
+		local stderr = vim.trim(M.strip_ansi(res.stderr or ""))
 		local stdout = vim.trim(res.stdout or "")
 		if res.code == 0 then
 			if stdout == "" then
@@ -83,17 +84,35 @@ function M.check(opts, callback)
 	end
 end
 
----Reduce devenv's stderr to the lines containing "error:" (the `rg error:`
----equivalent), stripping the coloured gutter devenv prefixes each line with.
----Falls back to the full text when nothing matches, so that e.g. "command not
----found" from bash is not swallowed.
+-- Glyphs devenv puts in front of its own failure lines (e.g. "× failed to stop process").
+local FAILURE_MARKERS = { "×", "✗" }
+
+---Strip devenv's coloured gutter (whitespace and status glyphs) from a line.
+---@param line string
+---@return string
+local function strip_gutter(line)
+	line = vim.trim(line)
+	for _, marker in ipairs(FAILURE_MARKERS) do
+		if vim.startswith(line, marker) then
+			return vim.trim(line:sub(#marker + 1))
+		end
+	end
+	return line
+end
+
+---Reduce devenv's stderr to the lines that carry the failure: those containing
+---"error:" (the `rg error:` equivalent) and those devenv itself marks with a
+---failure glyph. Falls back to the full text when nothing matches, so that
+---e.g. "command not found" from bash is not swallowed.
 ---@param stderr string Already ANSI-stripped stderr.
 ---@return string
 function M.summarize_errors(stderr)
 	local hits = {}
 	for line in stderr:gmatch("[^\n]+") do
-		if line:lower():find("error:", 1, true) then
-			hits[#hits + 1] = vim.trim(line:gsub("^[%s✗×•]+", ""))
+		local clean = strip_gutter(line)
+		local marked = clean ~= vim.trim(line)
+		if marked or clean:lower():find("error:", 1, true) then
+			hits[#hits + 1] = clean
 		end
 	end
 	if #hits == 0 then
@@ -118,7 +137,7 @@ end
 ---@param opts DevenvExportOpts
 ---@param callback fun(result: DevenvExportResult)
 function M.export(opts, callback)
-	local cmd = vim.list_extend({ opts.bash, "-c", SCRIPT, opts.bash }, devenv_cmd(opts.devenv))
+	local cmd = vim.list_extend({ opts.bash, "-c", SCRIPT, opts.bash }, M.cmd(opts.devenv))
 
 	local ok, err = pcall(vim.system, cmd, {
 		cwd = opts.cwd,
@@ -127,7 +146,7 @@ function M.export(opts, callback)
 		text = false,
 	}, function(res)
 		if res.code ~= 0 then
-			local stderr = strip_ansi(res.stderr or "")
+			local stderr = M.strip_ansi(res.stderr or "")
 			callback({
 				ok = false,
 				err = ("devenv exited with code %d:\n%s"):format(res.code, M.summarize_errors(stderr)),

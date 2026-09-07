@@ -1,6 +1,8 @@
 local config = require("devenv.config")
 local devenv = require("devenv.devenv")
 local watch = require("devenv.watch")
+local processes = require("devenv.processes")
+local panel = require("devenv.panel")
 
 local M = {}
 
@@ -22,6 +24,7 @@ local M = {}
 ---@field stderr string|nil Full devenv stderr from the last failed load.
 ---@field inputs string[] Files devenv's last evaluation depended on (from input-paths.txt).
 ---@field watching boolean Whether a change to `inputs` triggers a reload.
+---@field processes DevenvProcessesState Process manager state; see `up()`, `down()`, `processes_status()`.
 
 ---@type DevenvState
 M.state = {
@@ -34,6 +37,7 @@ M.state = {
 	stderr = nil,
 	inputs = {},
 	watching = false,
+	processes = processes.state,
 }
 
 local reload_pending = false
@@ -41,6 +45,10 @@ local reload_pending = false
 ---@param opts DevenvConfig|nil
 function M.setup(opts)
 	config.configure(opts)
+
+	if config.get("eager_manager") then
+		processes.start_manager_if_down(vim.fs.normalize(config.get("root") or vim.fn.getcwd()))
+	end
 
 	if config.get("auto_load") then
 		M.load()
@@ -163,6 +171,8 @@ function M.load(opts)
 
 			notify(("loaded %s (%d set, %d unset)"):format(root, #changed, #removed), vim.log.levels.INFO)
 			vim.api.nvim_exec_autocmds("User", { pattern = "DevenvLoaded", data = { root = root } })
+			-- Re-read the process configuration; recycles the manager only if it changed.
+			processes.reload(root)
 
 			if opts.on_done then
 				opts.on_done(true, M.state)
@@ -219,6 +229,100 @@ end
 ---@return DevenvStatus
 function M.status()
 	return M.state.status
+end
+
+---@return string
+local function project_root()
+	return M.state.root or vim.fs.normalize(config.get("root") or vim.fn.getcwd())
+end
+
+---Start processes and services in the background.
+---Manager not running: `devenv processes up -d [names]`, not_running -> initializing -> running.
+---Manager running: restarts the named processes (or all of them); stopped ones are started.
+---@param names string|string[]|nil
+---@param on_done DevenvProcessesCallback|nil Called once the processes are running, or on failure.
+function M.up(names, on_done)
+	processes.up(project_root(), names, on_done)
+end
+
+---Stop processes.
+---No names: everything (`devenv processes down`), running -> shutting_down -> not_running.
+---Names: only those (`devenv processes stop <name>` each); the rest keep running.
+---@param names string|string[]|nil
+---@param on_done DevenvProcessesCallback|nil
+function M.down(names, on_done)
+	processes.down(project_root(), names, on_done)
+end
+
+---@return DevenvProcessesStatus
+function M.processes_status()
+	return processes.status()
+end
+
+---Start the process manager without starting any process, so individual
+---processes can be started quickly afterwards. Done automatically when the
+---`eager_manager` option is set.
+---@param on_done DevenvProcessesCallback|nil
+function M.start_manager(on_done)
+	processes.start_manager(project_root(), on_done)
+end
+
+---Open the process panel: a read-only buffer with one process per line,
+---kept in sync with the process state. Focuses it if already open.
+function M.process_panel_open()
+	panel.open(project_root())
+end
+
+---Close the process panel window.
+function M.process_panel_close()
+	panel.close()
+end
+
+---Open the process panel if closed, close it if open.
+function M.process_panel_toggle()
+	panel.toggle(project_root())
+end
+
+---@param action fun(name: string)
+local function with_line_process(action)
+	local name, err = panel.line_name()
+	if not name then
+		notify(err, vim.log.levels.WARN)
+		return
+	end
+	action(name)
+end
+
+---Start the process on the cursor line of the process panel.
+---Restarts it if it is already running.
+---@param on_done DevenvProcessesCallback|nil
+function M.process_panel_line_start(on_done)
+	with_line_process(function(name)
+		M.up(name, on_done)
+	end)
+end
+
+---Stop the process on the cursor line of the process panel.
+---@param on_done DevenvProcessesCallback|nil
+function M.process_panel_line_stop(on_done)
+	with_line_process(function(name)
+		M.down(name, on_done)
+	end)
+end
+
+---Re-query devenv for the process state (also done automatically after
+---load() and periodically while running).
+---@param callback fun(state: DevenvProcessesState)|nil
+function M.processes_refresh(callback)
+	processes.refresh(project_root(), callback)
+end
+
+---Re-read the process configuration. If it changed while the manager is
+---running, the manager is recycled with the processes that were active.
+---Done automatically after every successful load().
+---@param on_done DevenvProcessesCallback|nil
+function M.processes_reload(on_done)
+	processes.reload(project_root(), on_done)
 end
 
 return M

@@ -11,6 +11,9 @@ local M = {}
 ---@field notify boolean|fun():boolean Emit vim.notify messages on load/failure.
 ---@field auto_reload boolean|fun():boolean After a load, watch the files devenv evaluated and reload when they change.
 ---@field reload_debounce_ms integer|fun():integer Delay between a file change and the reload.
+---@field processes_poll_ms integer|fun():integer How often to refresh process status while processes run. 0 disables polling.
+---@field panel_max_height integer|fun():integer The process panel grows with the process count up to this many lines.
+---@field eager_manager boolean|fun():boolean On setup(), start the process manager in the background if the project has processes and no manager is running, without starting any of them. A manager taken down later stays down.
 
 ---@type DevenvConfig
 M.default_config = {
@@ -22,6 +25,9 @@ M.default_config = {
 	notify = true,
 	auto_reload = false,
 	reload_debounce_ms = 200,
+	processes_poll_ms = 2000,
+	panel_max_height = 10,
+	eager_manager = false,
 }
 
 ---@type DevenvConfig
