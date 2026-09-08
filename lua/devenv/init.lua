@@ -410,6 +410,13 @@ function M.load(opts)
 					root .. " is not trusted; run `devenv allow` there first",
 					vim.log.levels.WARN
 				)
+
+				vim.api.nvim_exec_autocmds("User", {
+					pattern = "DevenvBlocked",
+					data = {
+						root = root,
+					},
+				})
 			end)
 			return
 		end
