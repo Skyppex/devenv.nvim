@@ -8,7 +8,7 @@ local M = {}
 
 ---@alias DevenvStatus
 ---| "not_loaded" # load() has not been called yet.
----| "loading"    # A load is in progress.
+---| "loading"    # The project is trusted and devenv is evaluating its environment.
 ---| "loaded"     # The devenv environment is applied.
 ---| "none"       # No devenv project was found for the root.
 ---| "blocked"    # The project exists but has not been trusted with `devenv allow`.
@@ -41,6 +41,12 @@ M.state = {
 }
 
 local reload_pending = false
+-- True from load() being called until its outcome is known (including the
+-- trust check, during which the status is not yet `loading`).
+local load_in_flight = false
+
+-- Watches devenv's trust list for `devenv allow` / `devenv revoke` run outside Neovim.
+local trust_watcher = watch.new()
 
 ---@param opts DevenvConfig|nil
 function M.setup(opts)
@@ -48,6 +54,10 @@ function M.setup(opts)
 
 	if config.get("eager_manager") then
 		processes.start_manager_if_down(vim.fs.normalize(config.get("root") or vim.fn.getcwd()))
+	end
+
+	if config.get("watch_trust") then
+		M.watch_trust()
 	end
 
 	if config.get("auto_load") then
@@ -70,6 +80,83 @@ local function ignored()
 		set[key] = true
 	end
 	return set
+end
+
+---@return string
+local function project_root()
+	return M.state.root or vim.fs.normalize(config.get("root") or vim.fn.getcwd())
+end
+
+---Put Neovim's environment back to the snapshot taken before the first load,
+---stop the input watcher and reset the load state to `status`.
+---@param status DevenvStatus
+---@return integer restored Variables set back to their original value.
+---@return integer removed Variables devenv had added.
+local function restore(status)
+	M.unwatch()
+	reload_pending = false
+
+	local restored, removed = 0, 0
+	local base = M.state.base
+	if base then
+		local ignore = ignored()
+		local current = vim.fn.environ()
+		for key, value in pairs(current) do
+			if not ignore[key] then
+				local original = base[key]
+				if original == nil then
+					vim.env[key] = nil
+					removed = removed + 1
+				elseif original ~= value then
+					vim.env[key] = original
+					restored = restored + 1
+				end
+			end
+		end
+		for key, value in pairs(base) do
+			if not ignore[key] and current[key] == nil then
+				vim.env[key] = value
+				restored = restored + 1
+			end
+		end
+	end
+
+	local root = M.state.root
+	M.state.base = nil
+	M.state.status = status
+	M.state.changed = {}
+	M.state.removed = {}
+	M.state.inputs = {}
+	M.state.err = nil
+	M.state.stderr = nil
+	vim.api.nvim_exec_autocmds("User", { pattern = "DevenvUnloaded", data = { root = root } })
+	return restored, removed
+end
+
+---@class DevenvUnloadOpts
+---@field on_done fun(ok: boolean, state: DevenvState)|nil
+
+---Undo load(): restore every environment variable to what it was before devenv
+---was first loaded, stop the input watcher and set the status to `not_loaded`.
+---Processes are left alone. Refused while a load is in progress.
+---@param opts DevenvUnloadOpts|nil
+function M.unload(opts)
+	opts = opts or {}
+	if load_in_flight then
+		notify("cannot unload while loading", vim.log.levels.WARN)
+		if opts.on_done then
+			opts.on_done(false, M.state)
+		end
+		return
+	end
+	local root = M.state.root
+	local restored, removed = restore("not_loaded")
+	if root then
+		notify(("unloaded %s (%d restored, %d removed)"):format(root, restored, removed), vim.log.levels.INFO)
+	end
+	if opts.on_done then
+		opts.on_done(true, M.state)
+	end
 end
 
 ---Trust the project (`devenv allow`) after a load reported `blocked`, then
@@ -107,13 +194,21 @@ function M.allow(opts)
 	end)
 end
 
----Withdraw trust from the project (`devenv revoke`). The environment already
----applied stays in place; the status becomes `blocked` so the next load() is
----refused until allow() is called again.
+---Withdraw trust from the project (`devenv revoke`) and unload its
+---environment. The status ends up `blocked`, so load() is refused until
+---allow() is called again. Processes are left alone.
 ---@param opts DevenvLoadOpts|nil
 function M.revoke(opts)
 	opts = opts or {}
 	local root = vim.fs.normalize(opts.root or config.get("root") or vim.fn.getcwd())
+
+	if load_in_flight then
+		notify("cannot revoke while loading", vim.log.levels.WARN)
+		if opts.on_done then
+			opts.on_done(false, M.state)
+		end
+		return
+	end
 
 	devenv.revoke({
 		cwd = root,
@@ -125,16 +220,58 @@ function M.revoke(opts)
 				M.state.err = result.err
 				notify("failed to revoke " .. root .. "\n" .. result.err, vim.log.levels.ERROR)
 			else
-				M.state.status = "blocked"
+				local restored, removed = restore("blocked")
 				M.state.root = root
-				M.state.err = nil
-				notify("revoked " .. root, vim.log.levels.INFO)
+				notify(("revoked %s (%d restored, %d removed)"):format(root, restored, removed), vim.log.levels.INFO)
 			end
 			if opts.on_done then
 				opts.on_done(result.ok, M.state)
 			end
 		end)
 	end)
+end
+
+---Bring the plugin in line with devenv's trust list after it changed outside
+---Neovim: a loaded project that lost trust is unloaded (status `blocked`); a
+---blocked project that gained trust is loaded. Anything else is left alone.
+---Called automatically when `watch_trust` is set.
+function M.sync_trust()
+	if M.state.status ~= "loaded" and M.state.status ~= "blocked" then
+		return
+	end
+	local root = project_root()
+	devenv.check({ cwd = root, devenv = config.get("devenv"), env = M.state.base }, function(check)
+		vim.schedule(function()
+			if M.state.status == "loaded" and check.state == "blocked" then
+				local restored, removed = restore("blocked")
+				M.state.root = root
+				notify(
+					("trust revoked outside Neovim, unloaded %s (%d restored, %d removed)"):format(
+						root,
+						restored,
+						removed
+					),
+					vim.log.levels.WARN
+				)
+			elseif M.state.status == "blocked" and check.state == "ok" then
+				notify("trust granted outside Neovim, loading " .. root, vim.log.levels.INFO)
+				M.load({ root = root })
+			end
+		end)
+	end)
+end
+
+---Watch devenv's trust list and call sync_trust() when it changes.
+---Done automatically by setup() when `watch_trust` is set.
+function M.watch_trust()
+	trust_watcher:start({ config.trust_file() }, function()
+		M.sync_trust()
+	end, config.get("reload_debounce_ms"))
+end
+
+---Stop watching devenv's trust list.
+function M.unwatch_trust()
+	trust_watcher:stop()
 end
 
 ---@class DevenvLoadOpts
@@ -153,12 +290,17 @@ function M.load(opts)
 	opts = opts or {}
 	local root = vim.fs.normalize(opts.root or config.get("root") or vim.fn.getcwd())
 
-	if M.state.status == "loading" then
+	if load_in_flight then
 		notify("already loading", vim.log.levels.WARN)
+		if opts.on_done then
+			opts.on_done(false, M.state)
+		end
 		return
 	end
 
-	M.state.status = "loading"
+	-- The status stays as it is while devenv is asked whether the project is
+	-- trusted; `loading` is entered only once the evaluation itself starts.
+	load_in_flight = true
 	M.state.err = nil
 	M.state.stderr = nil
 
@@ -168,7 +310,8 @@ function M.load(opts)
 		M.state.base = vim.fn.environ()
 	end
 
-	---Runs after every load attempt, whatever the outcome.
+	---Runs after every load attempt, whatever the outcome. The in-flight flag is
+	---cleared before on_done fires so callbacks may start a new load.
 	local function finish()
 		if config.get("auto_reload") then
 			M.watch()
@@ -186,6 +329,7 @@ function M.load(opts)
 	local function fail(status, err, msg, level)
 		M.state.status = status
 		M.state.err = err
+		load_in_flight = false
 		notify(msg, level)
 		if opts.on_done then
 			opts.on_done(false, M.state)
@@ -238,6 +382,7 @@ function M.load(opts)
 			M.state.root = root
 			M.state.changed = changed
 			M.state.removed = removed
+			load_in_flight = false
 
 			notify(("loaded %s (%d set, %d unset)"):format(root, #changed, #removed), vim.log.levels.INFO)
 			vim.api.nvim_exec_autocmds("User", { pattern = "DevenvLoaded", data = { root = root } })
@@ -273,6 +418,9 @@ function M.load(opts)
 		end
 		-- "ok", or "unknown" (older devenv without the check command): let the
 		-- real load decide, it reports its own errors.
+		vim.schedule(function()
+			M.state.status = "loading"
+		end)
 		devenv.export({ cwd = root, bash = config.get("bash"), devenv = devenv_cmd, env = M.state.base }, apply)
 	end)
 end
@@ -285,7 +433,7 @@ function M.watch()
 		return
 	end
 	watch.start(M.state.inputs, function(path)
-		if M.state.status == "loading" then
+		if load_in_flight then
 			reload_pending = true
 			return
 		end
@@ -304,11 +452,6 @@ end
 ---@return DevenvStatus
 function M.status()
 	return M.state.status
-end
-
----@return string
-local function project_root()
-	return M.state.root or vim.fs.normalize(config.get("root") or vim.fn.getcwd())
 end
 
 ---Start processes and services in the background.
