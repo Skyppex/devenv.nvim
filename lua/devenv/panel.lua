@@ -118,7 +118,7 @@ function M.render()
 	-- so the line APIs refuse it).
 	local placeholder = #lines == 0
 	if placeholder then
-		lines[1] = "devenv processes: " .. state.status
+		lines[1] = "no devenv processes found: " .. state.status
 	end
 
 	vim.bo[bufnr].modifiable = true
@@ -134,10 +134,22 @@ function M.render()
 		vim.api.nvim_buf_set_extmark(bufnr, ns, i - 1, 0, { end_col = m.name_end, hl_group = "DevenvProcessName" })
 		vim.api.nvim_buf_set_extmark(bufnr, ns, i - 1, m.phase_start, { end_col = m.phase_end, hl_group = m.phase_hl })
 		if m.restarts_start < m.restarts_end then
-			vim.api.nvim_buf_set_extmark(bufnr, ns, i - 1, m.restarts_start, { end_col = m.restarts_end, hl_group = "DevenvProcessRestarts" })
+			vim.api.nvim_buf_set_extmark(
+				bufnr,
+				ns,
+				i - 1,
+				m.restarts_start,
+				{ end_col = m.restarts_end, hl_group = "DevenvProcessRestarts" }
+			)
 		end
 		if m.ports_start < #lines[i] then
-			vim.api.nvim_buf_set_extmark(bufnr, ns, i - 1, m.ports_start, { end_col = #lines[i], hl_group = "DevenvProcessPort" })
+			vim.api.nvim_buf_set_extmark(
+				bufnr,
+				ns,
+				i - 1,
+				m.ports_start,
+				{ end_col = #lines[i], hl_group = "DevenvProcessPort" }
+			)
 		end
 	end
 
@@ -147,7 +159,7 @@ function M.render()
 		local max_height = math.max(1, config.get("panel_max_height") or 10)
 		vim.api.nvim_win_set_height(win, math.min(#lines, max_height))
 
-		local title = "devenv processes: " .. state.status
+		local title = "no devenv processes found: " .. state.status
 		if state.err then
 			title = title .. "  (error, see :lua =require('devenv').state.processes.err)"
 		end
