@@ -1,6 +1,7 @@
 {pkgs, ...}: {
   # https://devenv.sh/packages/
   packages = with pkgs; [
+    stylua
     git
     alejandra
     nixd

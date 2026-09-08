@@ -161,4 +161,55 @@ function M.export(opts, callback)
 	end
 end
 
+---@class DevenvTrustOpts
+---@field cwd string Directory whose project to (un)trust; devenv resolves the project from it.
+---@field devenv string|string[] The devenv command.
+---@field env table<string, string>|nil Exact environment to run in. Defaults to the current one.
+
+---@class DevenvTrustResult
+---@field ok boolean
+---@field err string|nil
+
+---Run `devenv allow` or `devenv revoke` in `cwd`.
+---The callback runs off the main loop; wrap Neovim API calls in vim.schedule.
+---@param subcommand "allow"|"revoke"
+---@param opts DevenvTrustOpts
+---@param callback fun(result: DevenvTrustResult)
+local function trust(subcommand, opts, callback)
+	local ok, err = pcall(vim.system, M.cmd(opts.devenv, subcommand), {
+		cwd = opts.cwd,
+		env = opts.env,
+		clear_env = opts.env ~= nil,
+		text = true,
+	}, function(res)
+		if res.code ~= 0 then
+			local stderr = M.strip_ansi(res.stderr or "")
+			callback({
+				ok = false,
+				err = ("devenv %s exited with code %d:\n%s"):format(subcommand, res.code, M.summarize_errors(stderr)),
+			})
+			return
+		end
+		callback({ ok = true })
+	end)
+
+	if not ok then
+		callback({ ok = false, err = ("failed to spawn devenv: %s"):format(err) })
+	end
+end
+
+---Trust the project in `cwd` (`devenv allow`), lifting the `blocked` state.
+---@param opts DevenvTrustOpts
+---@param callback fun(result: DevenvTrustResult)
+function M.allow(opts, callback)
+	trust("allow", opts, callback)
+end
+
+---Withdraw trust from the project in `cwd` (`devenv revoke`).
+---@param opts DevenvTrustOpts
+---@param callback fun(result: DevenvTrustResult)
+function M.revoke(opts, callback)
+	trust("revoke", opts, callback)
+end
+
 return M

@@ -72,6 +72,71 @@ local function ignored()
 	return set
 end
 
+---Trust the project (`devenv allow`) after a load reported `blocked`, then
+---load its environment. `on_done` is handed to that load.
+---@param opts DevenvLoadOpts|nil
+function M.allow(opts)
+	opts = opts or {}
+	local root = vim.fs.normalize(opts.root or config.get("root") or vim.fn.getcwd())
+
+	if M.state.status ~= "blocked" then
+		notify(("nothing to allow: status is %s, not blocked"):format(M.state.status), vim.log.levels.WARN)
+		if opts.on_done then
+			opts.on_done(false, M.state)
+		end
+		return
+	end
+
+	devenv.allow({
+		cwd = root,
+		devenv = config.get("devenv"),
+		env = M.state.base,
+	}, function(result)
+		vim.schedule(function()
+			if not result.ok then
+				M.state.err = result.err
+				notify("failed to allow " .. root .. "\n" .. result.err, vim.log.levels.ERROR)
+				if opts.on_done then
+					opts.on_done(false, M.state)
+				end
+				return
+			end
+			notify("allowed " .. root, vim.log.levels.INFO)
+			M.load({ root = root, on_done = opts.on_done })
+		end)
+	end)
+end
+
+---Withdraw trust from the project (`devenv revoke`). The environment already
+---applied stays in place; the status becomes `blocked` so the next load() is
+---refused until allow() is called again.
+---@param opts DevenvLoadOpts|nil
+function M.revoke(opts)
+	opts = opts or {}
+	local root = vim.fs.normalize(opts.root or config.get("root") or vim.fn.getcwd())
+
+	devenv.revoke({
+		cwd = root,
+		devenv = config.get("devenv"),
+		env = M.state.base,
+	}, function(result)
+		vim.schedule(function()
+			if not result.ok then
+				M.state.err = result.err
+				notify("failed to revoke " .. root .. "\n" .. result.err, vim.log.levels.ERROR)
+			else
+				M.state.status = "blocked"
+				M.state.root = root
+				M.state.err = nil
+				notify("revoked " .. root, vim.log.levels.INFO)
+			end
+			if opts.on_done then
+				opts.on_done(result.ok, M.state)
+			end
+		end)
+	end)
+end
+
 ---@class DevenvLoadOpts
 ---@field root string|nil Directory containing devenv.nix. Defaults to config.root, then cwd.
 ---@field on_done fun(ok: boolean, state: DevenvState)|nil Called after the environment has been applied.
@@ -143,7 +208,12 @@ function M.load(opts)
 
 			if not result.ok then
 				M.state.stderr = result.stderr
-				fail("failed", result.err, "failed to load environment from " .. root .. "\n" .. result.err, vim.log.levels.ERROR)
+				fail(
+					"failed",
+					result.err,
+					"failed to load environment from " .. root .. "\n" .. result.err,
+					vim.log.levels.ERROR
+				)
 				return
 			end
 
@@ -189,7 +259,12 @@ function M.load(opts)
 			return
 		elseif check.state == "blocked" then
 			vim.schedule(function()
-				fail("blocked", check.err, root .. " is not trusted; run `devenv allow` there first", vim.log.levels.WARN)
+				fail(
+					"blocked",
+					check.err,
+					root .. " is not trusted; run `devenv allow` there first",
+					vim.log.levels.WARN
+				)
 			end)
 			return
 		end
@@ -287,7 +362,9 @@ end
 local function with_line_process(action)
 	local name, err = panel.line_name()
 	if not name then
-		notify(err, vim.log.levels.WARN)
+		if err then
+			notify(err, vim.log.levels.WARN)
+		end
 		return
 	end
 	action(name)
