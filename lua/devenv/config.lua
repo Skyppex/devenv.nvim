@@ -13,7 +13,6 @@ local M = {}
 ---@field reload_debounce_ms integer|fun():integer Delay between a file change and the reload.
 ---@field processes_poll_ms integer|fun():integer How often to refresh process status while processes run. 0 disables polling.
 ---@field panel_max_height integer|fun():integer The process panel grows with the process count up to this many lines.
----@field eager_manager boolean|fun():boolean On setup(), start the process manager in the background if the project has processes and no manager is running, without starting any of them. A manager taken down later stays down.
 ---@field watch_trust boolean|fun():boolean Watch devenv's trust list so `devenv allow` / `devenv revoke` run outside Neovim load or unload the environment.
 ---@field trust_file string|nil|fun():string|nil Path of devenv's trust list. Defaults to `$XDG_DATA_HOME/devenv/allowed` (or `~/.local/share/devenv/allowed`).
 
@@ -29,7 +28,6 @@ M.default_config = {
 	reload_debounce_ms = 200,
 	processes_poll_ms = 2000,
 	panel_max_height = 10,
-	eager_manager = false,
 	watch_trust = false,
 	trust_file = nil,
 }

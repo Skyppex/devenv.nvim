@@ -52,10 +52,6 @@ local trust_watcher = watch.new()
 function M.setup(opts)
 	config.configure(opts)
 
-	if config.get("eager_manager") then
-		processes.start_manager_if_down(vim.fs.normalize(config.get("root") or vim.fn.getcwd()))
-	end
-
 	if config.get("watch_trust") then
 		M.watch_trust()
 	end
@@ -482,14 +478,6 @@ end
 ---@return DevenvProcessesStatus
 function M.processes_status()
 	return processes.status()
-end
-
----Start the process manager without starting any process, so individual
----processes can be started quickly afterwards. Done automatically when the
----`eager_manager` option is set.
----@param on_done DevenvProcessesCallback|nil
-function M.start_manager(on_done)
-	processes.start_manager(project_root(), on_done)
 end
 
 ---Open the process panel: a read-only buffer with one process per line,

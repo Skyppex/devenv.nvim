@@ -30,18 +30,15 @@ local M = {}
 ---@field restarts integer
 ---@field ports DevenvProcessPort[] Bound ports as reported by the manager, in devenv's order.
 
----Phase given to configured processes while the process manager is not running.
-M.PHASE_OFF = "off"
-
--- devenv cannot start the process manager on its own; `up` needs at least one
--- configured process. To start the manager without touching the user's
--- processes we inject a throwaway process with `--option` that exits at once.
--- It is filtered out of everything the plugin reports.
-local MANAGER_PROCESS = "devenv-nvim-manager"
+---Phase given to configured processes the manager does not report on, in
+---particular all of them while the manager is not running. It is the same
+---phase devenv uses for a registered process that has not been started, so a
+---process reads the same whether or not the manager happens to be up.
+M.PHASE_OFF = "not_started"
 
 ---@class DevenvProcessesState
 ---@field status DevenvProcessesStatus
----@field processes table<string, DevenvProcess> Processes by name. While the manager is down these are the configured processes with phase `off`.
+---@field processes table<string, DevenvProcess> Processes by name. While the manager is down these are the configured processes with phase `not_started`.
 ---@field configured string[] Process names from devenv.nix (via `devenv eval processes`), sorted.
 ---@field err string|nil Error from the last failed up/down/list/eval.
 
@@ -88,7 +85,7 @@ function M.parse_list(stdout)
 	local processes = {}
 	for line in devenv.strip_ansi(stdout):gmatch("[^\n]+") do
 		local name, phase, restarts, rest = line:match("^%s*(%S+)%s+(%S+)%s+restarts:%s*(%d+)(.*)$")
-		if name and name ~= MANAGER_PROCESS then
+		if name then
 			local ports = {}
 			local port_list = rest:match("ports:%s*(.*)$")
 			if port_list then
@@ -128,7 +125,7 @@ local function run(root, args, callback)
 	run_devenv(root, vim.list_extend({ "processes" }, args), callback)
 end
 
----Configured processes as an `off` process table.
+---Configured processes as a `not_started` process table (manager down).
 ---@return table<string, DevenvProcess>
 local function off_processes()
 	local processes = {}
@@ -136,6 +133,22 @@ local function off_processes()
 		processes[name] = { name = name, phase = M.PHASE_OFF, restarts = 0, ports = {} }
 	end
 	return processes
+end
+
+-- Phases that mean "the user wants this process running".
+local ACTIVE_PHASES = { ready = true, running = true, starting = true, pending = true, restarting = true }
+
+---Names of the processes currently in an active phase, sorted.
+---@return string[]
+local function active_names()
+	local names = {}
+	for name, p in pairs(M.state.processes) do
+		if ACTIVE_PHASES[p.phase] then
+			names[#names + 1] = name
+		end
+	end
+	table.sort(names)
+	return names
 end
 
 ---Copy of the current process table with `phase` set for `names` (all known
@@ -220,7 +233,7 @@ end
 
 ---Query `devenv processes list` and update the state from the answer.
 ---When no manager is running, the configured processes are discovered from
----devenv.nix instead and reported with phase `off`.
+---devenv.nix instead and reported with phase `not_started`.
 ---Transitional states (`initializing`, `shutting_down`) are left alone.
 ---@param root string
 ---@param callback fun(state: DevenvProcessesState)|nil
@@ -242,7 +255,7 @@ function M.refresh(root, callback)
 				table.sort(names)
 				M.state.configured = names
 			end
-			-- Keep configured processes the manager does not report as `off`.
+			-- Configured processes the manager does not report are `not_started`.
 			for _, name in ipairs(M.state.configured) do
 				if not listed[name] then
 					listed[name] = { name = name, phase = M.PHASE_OFF, restarts = 0, ports = {} }
@@ -409,7 +422,13 @@ function M.down(root, names, on_done)
 		return
 	end
 
-	set_state("shutting_down", with_phase({}, "stopping"))
+	-- Only processes that are actually running have anything to stop.
+	local stopping = active_names()
+	if #stopping > 0 then
+		set_state("shutting_down", with_phase(stopping, "stopping"))
+	else
+		set_state("shutting_down", M.state.processes)
+	end
 	stop_polling()
 	run(root, { "down" }, function(res, stderr)
 		if res.code ~= 0 and not stderr:find(NO_MANAGER, 1, true) then
@@ -427,42 +446,6 @@ function M.down(root, names, on_done)
 		done(on_done, true)
 	end)
 end
-
----Start the process manager without starting any configured process.
----Status goes not_running -> initializing -> running; all processes end up in
----devenv's `not_started` phase, ready for individual `up(name)` calls.
----No-op unless the status is `not_running`.
----@param root string
----@param on_done DevenvProcessesCallback|nil
-function M.start_manager(root, on_done)
-	if M.state.status ~= "not_running" then
-		done(on_done, M.state.status == "running")
-		return
-	end
-	M.state.err = nil
-	set_state("initializing", off_processes())
-	local args = {
-		"--option", ("processes.%s.exec:string"):format(MANAGER_PROCESS), "true",
-		"up", "-d", MANAGER_PROCESS,
-	}
-	run(root, args, function(res, stderr)
-		if res.code ~= 0 then
-			M.state.err = ("failed to start the process manager (exit %d):\n%s"):format(res.code, devenv.summarize_errors(stderr))
-			set_state("not_running", off_processes())
-			notify(M.state.err, vim.log.levels.ERROR)
-			done(on_done, false)
-			return
-		end
-		-- Mark running without an event; refresh() emits it with the process list.
-		M.state.status = "running"
-		M.refresh(root, function(state)
-			done(on_done, state.status == "running")
-		end)
-	end)
-end
-
--- Phases that mean "the user wants this process running".
-local ACTIVE_PHASES = { ready = true, running = true, starting = true, pending = true, restarting = true }
 
 ---Re-read the process configuration and make the manager follow it. The
 ---manager only reads process definitions when it starts, so when the
@@ -490,49 +473,16 @@ function M.reload(root, on_done)
 			return
 		end
 		notify("process configuration changed, restarting the process manager", vim.log.levels.INFO)
-		local active = {}
-		for name, p in pairs(M.state.processes) do
-			if ACTIVE_PHASES[p.phase] then
-				active[#active + 1] = name
-			end
-		end
-		table.sort(active)
+		local active = active_names()
 		M.down(root, nil, function(ok)
 			if not ok then
 				done(on_done, false)
 			elseif #active > 0 then
 				M.up(root, active, on_done)
-			elseif config.get("eager_manager") then
-				-- Nothing was running, but the user did not ask for the manager to
-				-- stop: bring it back on the new configuration.
-				M.start_manager(root, on_done)
 			else
+				-- Nothing was running; the manager stays down until the next up().
 				done(on_done, true)
 			end
-		end)
-	end)
-end
-
----Eager startup, run once from setup(): resolve the project containing `cwd`
----and, if it has processes but no running manager, start one. Nothing else
----ever starts the manager unasked, so a manager taken down later stays down.
----
----The project root is resolved with devenv's own check rather than taken from
----`cwd` directly: outside a project, devenv evaluates the `--option` override
----on its own and would start a manager knowing only the throwaway process.
----@param cwd string
-function M.start_manager_if_down(cwd)
-	devenv.check({ cwd = cwd, devenv = config.get("devenv") }, function(check)
-		if check.state ~= "ok" or not check.root then
-			return
-		end
-		local root = vim.fs.normalize(check.root)
-		vim.schedule(function()
-			M.refresh(root, function(state)
-				if state.status == "not_running" and #state.configured > 0 then
-					M.start_manager(root)
-				end
-			end)
 		end)
 	end)
 end

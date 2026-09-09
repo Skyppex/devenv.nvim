@@ -27,7 +27,6 @@ local PHASE_HL = {
 	stopping = "DevenvProcessStarting",
 	stopped = "DevenvProcessStopped",
 	not_started = "DevenvProcessStopped",
-	off = "DevenvProcessStopped",
 	exited = "DevenvProcessStopped",
 	completed = "DevenvProcessStopped",
 	failed = "DevenvProcessFailed",
