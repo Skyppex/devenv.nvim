@@ -2,13 +2,12 @@
   # https://devenv.sh/packages/
   packages = with pkgs; [
     stylua
-    git
     alejandra
-    nixd
   ];
 
   # https://devenv.sh/languages/
   languages.lua.enable = true;
+  languages.nix.enable = true;
 
   services = {
     postgres = {
