@@ -30,7 +30,7 @@ M.default_config = {
 	processes_poll_ms = 2000,
 	panel_max_height = 10,
 	eager_manager = false,
-	watch_trust = true,
+	watch_trust = false,
 	trust_file = nil,
 }
 
